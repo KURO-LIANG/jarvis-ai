@@ -1,13 +1,18 @@
 # Jarvis Voice Assistant
 
-A terminal-based AI voice assistant for macOS (Apple Silicon). Press Enter to talk, press Enter again to stop — Jarvis listens, thinks, and speaks back.
+A hands-free AI voice assistant for macOS (Apple Silicon). Say "Jarvis" to wake, speak naturally, and Jarvis listens, thinks, and replies. Supports barge-in (interrupt by speaking) and voice exit.
 
 ## Features
 
-- **Voice I/O** — Microphone recording (16kHz) + macOS `afplay` playback
+- **Hands-free** — Wake word detection ("Jarvis"), continuous conversation, auto-timeout
+- **Barge-in** — Speak at any time to interrupt Jarvis mid-sentence
+- **Voice exit** — Say "安静" / "退出" / "闭嘴" to leave conversation mode
+- **VAD** — WebRTC Voice Activity Detection filters silence, only sends speech to ASR
+- **State machine** — IDLE → LISTENING → THINKING → SPEAKING lifecycle
 - **Multi-provider LLM** — MiniMax (OpenAI-compatible), easily extensible
 - **Multi-provider Speech** — Qwen3-TTS (local OMLX) or MiniMax T2A v2 (streaming + non-streaming)
-- **Conversation Memory** — Short-term (recent turns) + Long-term summary memory, persisted to disk
+- **Threaded playback** — Non-blocking audio with `afplay`, supports instant stop
+- **Conversation Memory** — Short-term (recent turns) + Long-term summary, persisted to disk
 - **Debug mode** — Text-based I/O, no microphone required
 
 ## Prerequisites
@@ -37,10 +42,14 @@ python -m jarvis.main
 
 ### Voice Mode (default)
 
-1. Press **Enter** to start recording
-2. Speak your question
-3. Press **Enter** to stop
-4. Jarvis transcribes → thinks → speaks
+1. Jarvis starts in IDLE — waiting for wake word
+2. Say **"Jarvis"** to activate
+3. Speak naturally — Jarvis transcribes → thinks → replies
+4. Say **"安静"** / **"退出"** / **"闭嘴"** to exit conversation
+5. Or wait 15s of silence for auto-timeout
+6. Jarvis returns to IDLE, waiting for wake word
+
+**Barge-in:** Speak while Jarvis is talking to interrupt and go again.
 
 ### Debug Mode (no microphone)
 
@@ -49,6 +58,23 @@ DEBUG_MODE=true python -m jarvis.main
 ```
 
 Type your message at the `You: >` prompt. Press **Ctrl+C** to exit.
+
+## Interaction Flow
+
+```
+[Jarvis] Waiting for wake word: "jarvis"...
+  ↓ User: "Jarvis"
+[Jarvis] Listening...
+  ↓ User: "今天天气怎么样"
+[Jarvis] Thinking...
+  ↓
+Jarvis: 今天天气晴朗...
+  ↓ User: "停一下" (any speech interrupts)
+[Jarvis] Listening...
+  ↓ User: "退出聊天"
+Jarvis: 好的，已退出聊天模式
+[Jarvis] Timeout — waiting for wake word: "jarvis"...
+```
 
 ## Configuration
 
@@ -60,6 +86,17 @@ All settings via `.env` file or environment variables.
 |---|---|
 | `MINIMAX_API_KEY` | MiniMax API key |
 | `OMLX_API_KEY` | OMLX local server API key |
+
+### Wake Word + Voice Interaction
+
+| Variable | Default | Description |
+|---|---|---|
+| `WAKE_WORD` | `jarvis` | Wake word (case-insensitive) |
+| `CONVERSATION_TIMEOUT` | `15.0` | Seconds of silence before auto-exit |
+| `VAD_AGGRESSIVENESS` | `2` | VAD sensitivity (0-3, 3=most) |
+| `WAKE_BEEP_ENABLED` | `true` | Play beep on timeout return to IDLE |
+| `TIMEOUT_BEEP_ENABLED` | `true` | Play beep on timeout return to IDLE |
+| `EXIT_COMMANDS` | `["安静","闭嘴","退出",...]` | Voice phrases to exit conversation |
 
 ### LLM
 
@@ -138,6 +175,15 @@ SPEECH_PROVIDER=qwen
 
 All switching via `.env`, no code changes needed.
 
+## Voice Commands
+
+| Command | Effect |
+|---|---|
+| Say **"Jarvis"** | Wake from IDLE, enter conversation |
+| Say **"安静" / "闭嘴" / "退出" / "别说话" / "去休息" / "退出聊天" / "不和你聊了" / "结束对话" / "再见"** | Exit conversation, return to IDLE |
+| Say **anything** during Jarvis speaking | Barge-in — interrupt playback, continue conversation |
+| Silence for 15s | Auto-timeout, return to IDLE |
+
 ## Memory System
 
 Jarvis has two layers of memory:
@@ -169,8 +215,11 @@ jarvis/
 ├── .env.example          # Config template
 │
 ├── audio/
-│   ├── recorder.py       # MicrophoneRecorder (sounddevice → input.wav)
-│   └── player.py         # AudioPlayer (macOS afplay, supports .wav/.mp3)
+│   ├── beep.py           # BeepGenerator (numpy sine wave beeps)
+│   ├── continuous_mic.py # ContinuousMicStream (always-on InputStream + queue)
+│   ├── player.py         # AudioPlayer (threaded afplay, stop/is_playing/wait)
+│   ├── recorder.py       # MicrophoneRecorder (start/stop, for legacy)
+│   └── vad_processor.py  # VadProcessor (WebRTC VAD, speech segmentation)
 │
 ├── asr/
 │   └── qwen_asr.py       # QwenASR (OMLX /v1/audio/transcriptions)
@@ -203,29 +252,46 @@ jarvis/
 │   └── qwen_tts.py       # QwenTTS HTTP client (OMLX /v1/audio/speech)
 │
 └── core/
-    ├── input_strategy.py # InputStrategy (Voice / Text)
-    └── jarvis.py         # Pipeline orchestrator
+    ├── command_detector.py  # CommandDetector (exit command matching)
+    ├── input_strategy.py    # InputStrategy (Voice / Text)
+    ├── jarvis.py            # Pipeline orchestrator (state machine)
+    ├── state_machine.py     # StateMachine (IDLE/LISTENING/THINKING/SPEAKING)
+    └── wake_word.py         # WakeWordDetector (case-insensitive match)
 ```
 
 ## Architecture
 
 ```
-User Input
-    │
-    ▼
-InputStrategy (Voice → ASR, or Text)
-    │
-    ▼
-ConversationProvider
-    ├── Memory: build_context() → system_prompt
-    ├── Memory: get_recent_messages() → message history
-    ├── LLM → reply text
-    ├── Memory: save_turn() + extract_and_update()
-    └── SpeechProvider.synthesize(reply_text)
-          │
-          ▼
-    AudioPlayer.play_file()
+[Always-on Mic] → [ContinuousMicStream] → [queue.Queue] → [VadProcessor]
+                                                               ↓
+                                                         [SpeechSegment]
+                                                               ↓
+                                                            [QwenASR]
+                                                               ↓
+┌───────────────────────── State Machine ──────────────────────────────┐
+│                                                                       │
+│  IDLE ──(wake word)──→ LISTENING ──(text)──→ THINKING ──→ SPEAKING  │
+│    ↑                      ↑          ↑                      │        │
+│    │                 (timeout)   (error)              (barge-in)      │
+│    │                      ↑          ↑                      │        │
+│    └──(exit)──────────────┴──────────┴──────────────────────┘        │
+│                                                                       │
+└───────────────────────────────────────────────────────────────────────┘
+                                                               │
+                                                               ▼
+                              ConversationProvider (LLM + Memory + Speech)
+                                                               │
+                                                               ▼
+                                       AudioPlayer (threaded afplay)
 ```
+
+### Thread Model
+
+| Thread | Role | Sync |
+|---|---|---|
+| Audio callback | `sounddevice` real-time, writes chunks to `queue.Queue` | `queue.Queue` |
+| Playback thread | `subprocess.Popen("afplay")`, daemon thread | `threading.Lock` + `threading.Event` |
+| Main loop | VAD → ASR → state machine → LLM → TTS → `player.play()` | Single consumer, polls `playback_done` |
 
 ## Troubleshooting
 
@@ -238,3 +304,7 @@ ConversationProvider
 **"Playback failed: AudioFileOpen failed"** — For MiniMax Speech, ensure `MINIMAX_SPEECH_AUDIO_FORMAT=mp3` (not `wav`, which MiniMax doesn't support).
 
 **Memory not loading** — Check `~/.jarvis/memory/user_memory.json` exists and is valid JSON. Delete it to reset.
+
+**Wake word not detected** — Speak clearly. The wake word must appear in the ASR transcription as a substring (case-insensitive). Try saying just "Jarvis" first.
+
+**Barge-in not working** — VAD must detect speech during playback. Ensure `VAD_AGGRESSIVENESS` is not 0 (0=least sensitive). Default is 2.

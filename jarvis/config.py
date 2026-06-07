@@ -71,6 +71,19 @@ class Settings(BaseSettings):
     memory_auto_extract: bool = True
     memory_storage_path: str = "~/.jarvis/memory"
 
+    # Wake word + continuous listening
+    wake_word: str = "jarvis"
+    conversation_timeout: float = 15.0
+    vad_aggressiveness: int = 2  # 0=least, 3=most aggressive
+    wake_beep_enabled: bool = True
+    timeout_beep_enabled: bool = True
+
+    # Voice commands
+    exit_commands: list[str] = [
+        "安静", "闭嘴", "退出", "别说话", "去休息",
+        "退出聊天", "不和你聊了", "结束对话", "再见",
+    ]
+
     # Retry
     max_retries: int = 1
 
