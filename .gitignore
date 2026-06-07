@@ -1,0 +1,8 @@
+jarvis/.env
+*.wav
+__pycache__/
+*.pyc
+.idea
+.git
+jarvis/input.*
+jarvis/reply.*
