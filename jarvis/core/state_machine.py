@@ -3,10 +3,11 @@ from typing import Callable
 
 
 class AssistantState(Enum):
-    IDLE = "idle"            # Waiting for wake word, continuously listening
-    LISTENING = "listening"  # Active, waiting for user speech
-    THINKING = "thinking"    # LLM processing / TTS generating
-    SPEAKING = "speaking"    # TTS playback (mic stays active for barge-in)
+    IDLE = "idle"                    # Waiting for wake word, continuously listening
+    WAKE_RESPONSE = "wake_response"  # Playing wake response, VAD/ASR disabled
+    LISTENING = "listening"          # Active conversation, waiting for user speech
+    THINKING = "thinking"            # LLM processing / TTS generating
+    SPEAKING = "speaking"            # TTS playback (wake-word barge-in only)
 
 
 StateListener = Callable[[AssistantState], None]
@@ -30,8 +31,13 @@ class StateMachine:
     # -- Transitions --
 
     def wake_word_detected(self) -> None:
-        """IDLE -> LISTENING."""
+        """IDLE -> WAKE_RESPONSE."""
         if self._state == AssistantState.IDLE:
+            self._transition_to(AssistantState.WAKE_RESPONSE)
+
+    def wake_response_done(self) -> None:
+        """WAKE_RESPONSE -> LISTENING."""
+        if self._state == AssistantState.WAKE_RESPONSE:
             self._transition_to(AssistantState.LISTENING)
 
     def start_thinking(self) -> None:
@@ -60,9 +66,9 @@ class StateMachine:
             self._transition_to(AssistantState.IDLE)
 
     def thinking_failed(self) -> None:
-        """THINKING -> LISTENING (LLM/TTS error recovery)."""
+        """THINKING -> IDLE (LLM/TTS error — re-wake needed)."""
         if self._state == AssistantState.THINKING:
-            self._transition_to(AssistantState.LISTENING)
+            self._transition_to(AssistantState.IDLE)
 
     def timeout(self) -> None:
         """LISTENING -> IDLE (silence timeout)."""
@@ -73,6 +79,9 @@ class StateMachine:
 
     def is_idle(self) -> bool:
         return self._state == AssistantState.IDLE
+
+    def is_wake_response(self) -> bool:
+        return self._state == AssistantState.WAKE_RESPONSE
 
     def is_listening(self) -> bool:
         return self._state == AssistantState.LISTENING

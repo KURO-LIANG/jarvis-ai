@@ -1,3 +1,4 @@
+import random
 import time
 from pathlib import Path
 
@@ -5,38 +6,45 @@ from jarvis.asr.qwen_asr import ASRError, QwenASR
 from jarvis.audio.beep import BeepGenerator
 from jarvis.audio.continuous_mic import ContinuousMicStream
 from jarvis.audio.player import AudioPlayer, PlaybackError
-from jarvis.audio.vad_processor import SpeechSegment, VadProcessor
 from jarvis.config import settings
 from jarvis.conversation.base import ConversationProvider
-from jarvis.conversation.minimax_provider import MiniMaxConversationProvider
+from jarvis.conversation.llm_provider import LLMConversationProvider
 from jarvis.conversation.qwen_tts_provider import QwenTTSConversationProvider
 from jarvis.core.command_detector import CommandDetector
 from jarvis.core.input_strategy import TextInputStrategy
 from jarvis.core.state_machine import AssistantState, StateMachine
-from jarvis.core.wake_word import WakeWordDetector
 from jarvis.llm.base import LLMError
-from jarvis.llm.minimax import MiniMaxProvider
+from jarvis.llm.factory import create_llm_provider
 from jarvis.memory.manager import MemoryManager
 from jarvis.speech.base import SpeechError, SpeechProvider
 from jarvis.speech.factory import create_speech_provider
 from jarvis.tts.qwen_tts import TTSError
+from jarvis.core.wake_word import WakeWordDetector
+from jarvis.vad.base import SpeechSegment
+from jarvis.vad.factory import create_vad_provider
 
 
 class Jarvis:
     """Orchestrates the voice assistant pipeline.
 
-    Voice mode:  continuous mic -> VAD -> ASR -> wake word / commands /
-    barge-in -> LLM -> TTS -> threaded playback.
+    Architecture:
+      IDLE:          Mic -> Silero VAD -> ASR -> strict wake word match
+      WAKE_RESPONSE: Play wake reply, VAD/ASR disabled
+      LISTENING:     Mic -> Silero VAD -> ASR -> LLM -> TTS -> loop
+      SPEAKING:      Mic -> Silero VAD -> ASR -> wake-word-only barge-in
 
-    States: IDLE -> LISTENING -> THINKING -> SPEAKING -> LISTENING
+    States: IDLE -> WAKE_RESPONSE -> LISTENING -> THINKING -> SPEAKING -> LISTENING
     """
 
     def __init__(self) -> None:
         self._state = StateMachine()
-        self._wake = WakeWordDetector(settings.wake_word)
-        self._commands = CommandDetector(settings.exit_commands)
+        self._commands = CommandDetector(
+            settings.exit_commands, settings.interrupt_commands
+        )
 
         if not settings.debug_mode:
+            self._wake_word_detector = WakeWordDetector(settings.wake_words)
+            self._vad_provider = create_vad_provider()
             self._asr = QwenASR(
                 base_url=settings.omlx_base_url,
                 api_key=settings.omlx_api_key,
@@ -45,11 +53,17 @@ class Jarvis:
                 max_retries=settings.max_retries,
             )
         else:
+            self._wake_word_detector = None
+            self._vad_provider = None
             self._asr = None
 
         speech_provider = self._build_speech_provider()
+        self._speech = speech_provider  # retained for fixed-reply TTS (no LLM)
         memory = self._build_memory()
         self._build_conversation_provider(speech_provider, memory)
+        self._waiting_since: float | None = None
+        self._last_wake_response: str | None = None
+        self._request_start_time: float = 0.0
         self._player = AudioPlayer()
 
     def _build_speech_provider(self) -> SpeechProvider:
@@ -58,12 +72,7 @@ class Jarvis:
     def _build_memory(self) -> MemoryManager | None:
         if not settings.memory_enabled:
             return None
-        llm = MiniMaxProvider(
-            api_key=settings.minimax_api_key,
-            base_url=settings.minimax_base_url,
-            model=settings.minimax_model,
-            max_retries=settings.max_retries,
-        )
+        llm = create_llm_provider()
         mm = MemoryManager(
             max_turns=settings.memory_max_turns,
             storage_path=Path(settings.memory_storage_path).expanduser()
@@ -82,7 +91,7 @@ class Jarvis:
                 speech_provider
             )
         else:
-            self._conversation = MiniMaxConversationProvider(
+            self._conversation = LLMConversationProvider(
                 speech_provider, memory=memory
             )
 
@@ -109,19 +118,14 @@ class Jarvis:
 
                 print(f"You: {user_text}")
 
-                t0 = time.time()
+                start = time.time()
                 result = self._conversation.respond(user_text)
-                t1 = time.time()
+                elapsed = time.time() - start
 
+                print(f"Jarvis: {result.text}")
+                print(f"[ AI ] Latency: {elapsed:.1f}s")
                 self._player.play(result.audio_path)
                 self._player.wait()
-                t2 = time.time()
-
-                print(
-                    f"[Timing] Conversation: {t1 - t0:.1f}s, "
-                    f"Playback: {t2 - t1:.1f}s, "
-                    f"Total: {t2 - t0:.1f}s"
-                )
             except KeyboardInterrupt:
                 raise
             except LLMError as e:
@@ -140,27 +144,28 @@ class Jarvis:
     # -- Voice loop --
 
     def _run_voice_loop(self) -> None:
-        """State-machine-driven continuous listening loop."""
+        """State-machine-driven continuous listening loop.
+
+        IDLE:          Silero VAD → ASR → text wake word match.
+        WAKE_RESPONSE: Wait for wake reply playback + guard delay.
+        LISTENING:     Silero VAD → ASR → command routing.
+        SPEAKING:      Silero VAD → ASR → wake-word barge-in.
+        THINKING:      Mic chunks are skipped.
+        """
         mic = ContinuousMicStream(
             sample_rate=settings.sample_rate,
             channels=settings.channels,
-            blocksize=480,
-        )
-        vad = VadProcessor(
-            sample_rate=settings.sample_rate,
-            vad_aggressiveness=settings.vad_aggressiveness,
-            frame_ms=30,
-            silence_threshold_ms=800,
-            min_speech_ms=300,
+            blocksize=512,  # 32ms — minimum Silero VAD accepts (sr/len <= 31.25)
         )
 
         self._state.on_state_change(self._make_state_listener(mic))
+        self._mic = mic
 
         mic.start()
-        last_speech_time = time.time()
 
+        words = ", ".join(f'"{w}"' for w in settings.wake_words)
         print()
-        print(f'Waiting for wake word: "{settings.wake_word}"...')
+        print(f"Waiting for wake words: {words}...")
 
         try:
             while True:
@@ -169,90 +174,120 @@ class Jarvis:
                     self._state.done_speaking()  # SPEAKING -> LISTENING
 
                 # --- Timeout check for LISTENING ---
-                if self._state.is_listening():
-                    elapsed = time.time() - last_speech_time
+                if self._state.is_listening() and self._waiting_since is not None:
+                    elapsed = time.time() - self._waiting_since
                     if elapsed >= settings.conversation_timeout:
-                        segment = vad.flush()
+                        print("[ AI ] Conversation timeout.")
+                        segment = self._vad_provider.flush()
                         if segment is not None:
-                            self._process_segment(segment)
+                            self._process_conversation_segment(segment)
                         self._state.timeout()  # LISTENING -> IDLE
 
                 # --- Get next audio chunk ---
                 chunk = mic.get_chunk(timeout=0.1)
-
                 if chunk is None:
                     continue
 
-                segment = vad.process_frame(chunk)
-                if segment is not None:
-                    last_speech_time = time.time()
-                    self._process_segment(segment)
+                # --- Route by state ---
+                if self._state.is_idle():
+                    # IDLE: VAD → ASR → wake word text match
+                    segment = self._vad_provider.process_frame(chunk)
+                    if segment is not None:
+                        print("[ AI ] Heard speech, checking...")
+                        text = self._transcribe(segment)
+                        if text and self._wake_word_detector.is_wake_word(text):
+                            self._vad_provider.reset()
+                            stripped = self._wake_word_detector.strip_wake_word(text)
+                            self._state.wake_word_detected()  # IDLE -> WAKE_RESPONSE
+                            if stripped:
+                                # Wake word + command: skip wake response, go to LISTENING
+                                self._request_start_time = time.time()
+                                self._state.wake_response_done()  # WAKE_RESPONSE -> LISTENING
+                                self._process_conversation_command(stripped)
+                            else:
+                                # Only wake word: play random wake response
+                                self._reply_wake()
+                        else:
+                            if text:
+                                print(f'[ AI ] Ignored: "{text}"')
+                            self._vad_provider.reset()
+                            self._mic.drain()
+
+                elif self._state.is_wake_response():
+                    # WAKE_RESPONSE: no VAD/ASR, wait for wake reply to finish
+                    if self._player.playback_done.is_set():
+                        time.sleep(settings.wake_response_guard_ms / 1000)
+                        self._state.wake_response_done()  # WAKE_RESPONSE -> LISTENING
+
+                elif self._state.is_listening():
+                    segment = self._vad_provider.process_frame(chunk)
+                    if segment is not None:
+                        self._process_conversation_segment(segment)
+
+                elif self._state.is_speaking():
+                    # Barge-in: only specific interrupt commands trigger
+                    segment = self._vad_provider.process_frame(chunk)
+                    if segment is not None:
+                        self._process_barge_in_segment(segment)
+
+                # THINKING: skip mic processing
 
         except KeyboardInterrupt:
             raise
         finally:
             mic.stop()
+            self._mic = None
 
-    # -- Speech segment routing --
+    # -- Segment handlers --
 
-    def _process_segment(self, segment: SpeechSegment) -> None:
-        """Transcribe and route based on current state."""
+    def _process_conversation_segment(self, segment: SpeechSegment) -> None:
+        """Transcribe and handle speech in LISTENING state."""
+        self._request_start_time = time.time()
         text = self._transcribe(segment)
         if not text:
             return
+        self._process_conversation_command(text)
 
-        if self._state.is_idle():
-            self._handle_idle(text)
-
-        elif self._state.is_listening():
-            self._handle_listening(text)
-
-        elif self._state.is_speaking():
-            # Barge-in: any speech during playback interrupts
-            print(f"[Jarvis] Barge-in detected, stopping playback...")
-            self._player.stop()
-            self._state.barge_in()  # SPEAKING -> LISTENING
-            # Now process the interrupting speech as a new command
-            self._handle_listening(text)
-
-        # THINKING: speech is ignored
-
-    # -- State-specific handlers --
-
-    def _handle_idle(self, text: str) -> None:
-        """Check for wake word in IDLE state."""
-        if not self._wake.is_wake_word(text):
-            print(f"[Jarvis] Ignored (no wake word): {text}")
-            return
-
-        command = self._wake.strip_wake_word(text)
-        self._state.wake_word_detected()  # IDLE -> LISTENING
-
-        if command:
-            # User said "jarvis <command>" in one utterance
-            self._handle_user_command(command)
-
-    def _handle_listening(self, text: str) -> None:
-        """Handle user speech in LISTENING state."""
+    def _process_conversation_command(self, text: str) -> None:
+        """Process a user command in LISTENING state."""
         if self._commands.is_exit_command(text):
             self._state.exit_conversation()  # LISTENING -> IDLE
-            self._play_exit_message()
+            self._vad_provider.reset()
+            self._reply_audio("好的，再见。")
+            self._mic.drain()
             return
 
         print(f"You: {text}")
         self._handle_user_command(text)
+
+    def _process_barge_in_segment(self, segment: SpeechSegment) -> None:
+        """Only wake word can interrupt TTS playback."""
+        text = self._transcribe(segment)
+        if not text:
+            return
+
+        if self._wake_word_detector.is_wake_word(text):
+            stripped = self._wake_word_detector.strip_wake_word(text)
+            print("[ AI ] Wake word detected, stopping playback...")
+            self._player.stop()
+            time.sleep(0.3)
+            self._state.barge_in()  # SPEAKING -> LISTENING
+            if stripped:
+                self._request_start_time = time.time()
+                self._process_conversation_command(stripped)
+            else:
+                self._reply_wake()
 
     def _handle_user_command(self, text: str) -> None:
         """Process a user command: LLM -> TTS -> play (non-blocking)."""
         self._state.start_thinking()  # LISTENING -> THINKING
 
         try:
-            t0 = time.time()
             result = self._conversation.respond(text)
-            t1 = time.time()
 
+            elapsed = time.time() - self._request_start_time
             print(f"Jarvis: {result.text}")
-            print(f"[Timing] Conversation: {t1 - t0:.1f}s")
+            print(f"[ AI ] Latency: {elapsed:.1f}s")
 
             self._state.start_speaking()  # THINKING -> SPEAKING
             self._player.play(result.audio_path)  # non-blocking
@@ -260,7 +295,7 @@ class Jarvis:
         except (LLMError, TTSError, SpeechError) as e:
             print(f"{type(e).__name__}: {e}")
             if self._state.is_thinking():
-                self._state.thinking_failed()  # THINKING -> LISTENING
+                self._state.thinking_failed()  # THINKING -> IDLE
 
     # -- Helpers --
 
@@ -277,27 +312,44 @@ class Jarvis:
         finally:
             segment.audio_path.unlink(missing_ok=True)
 
-    def _play_exit_message(self) -> None:
-        """Synthesize and play exit notification."""
+    def _reply_audio(self, text: str) -> None:
+        """Synthesize text via speech provider and play non-blocking (no LLM)."""
         try:
-            exit_msg = "好的，已退出聊天模式"
-            result = self._conversation.respond(exit_msg)
-            print(f"Jarvis: {exit_msg}")
-            AudioPlayer.play_file(result.audio_path)
-            result.audio_path.unlink(missing_ok=True)
+            import tempfile
+
+            ext = self._speech.audio_format
+            with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as f:
+                output_path = Path(f.name)
+            audio_path = self._speech.synthesize(text, output_path)
+            print(f"Jarvis: {text}")
+            self._player.play(audio_path)
         except Exception as e:
-            print(f"Exit message failed: {e}")
+            print(f"Reply audio failed: {e}")
+
+    def _reply_wake(self) -> None:
+        """Play a random wake response, avoiding consecutive repeats."""
+        candidates = [r for r in settings.wake_responses if r != self._last_wake_response]
+        if not candidates:
+            candidates = settings.wake_responses
+        response = random.choice(candidates)
+        self._last_wake_response = response
+        self._reply_audio(response)
 
     def _make_state_listener(self, mic: ContinuousMicStream):
         """Factory for state-change callback."""
 
         def on_state(new_state: AssistantState) -> None:
-            if new_state == AssistantState.LISTENING:
+            if new_state == AssistantState.WAKE_RESPONSE:
                 mic.drain()
-                print("\n[Jarvis] Listening...")
+
+            elif new_state == AssistantState.LISTENING:
+                self._waiting_since = time.time()
+                mic.drain()
+                print("\n[ AI ] Listening...")
 
             elif new_state == AssistantState.THINKING:
-                print("[Jarvis] Thinking...")
+                self._waiting_since = None
+                print("[ AI ] Thinking...")
 
             elif new_state == AssistantState.SPEAKING:
                 mic.drain()
@@ -305,9 +357,10 @@ class Jarvis:
             elif new_state == AssistantState.IDLE:
                 if settings.timeout_beep_enabled:
                     self._play_beep(BeepGenerator.timeout_beep())
+                mic.drain()
+                words = ", ".join(f'"{w}"' for w in settings.wake_words)
                 print(
-                    f'\n[Jarvis] Timeout — waiting for wake word: '
-                    f'"{settings.wake_word}"...'
+                    f"\n[ AI ] Timeout — waiting for wake words: {words}..."
                 )
 
         return on_state

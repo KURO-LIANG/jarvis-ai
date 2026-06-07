@@ -2,6 +2,7 @@ import re
 
 from openai import OpenAI
 
+from jarvis.config import settings
 from jarvis.llm.base import ChatResponse, LLMError, LLMProvider, Message
 
 
@@ -12,14 +13,14 @@ def _mask_key(api_key: str) -> str:
     return f"{api_key[:8]}...{api_key[-4:]}"
 
 
-class MiniMaxProvider(LLMProvider):
-    """MiniMax LLM via OpenAI-compatible API."""
+class OpenAIProvider(LLMProvider):
+    """LLM provider for any OpenAI-compatible API (DeepSeek, MiniMax, OpenAI, Ollama, etc.)."""
 
     def __init__(
         self,
         api_key: str,
-        base_url: str = "https://api.minimaxi.com/v1",
-        model: str = "abab7-chat",
+        base_url: str,
+        model: str,
         max_retries: int = 1,
     ) -> None:
         self._api_key = api_key
@@ -38,7 +39,7 @@ class MiniMaxProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: int = 1024,
     ) -> ChatResponse:
-        """Send chat completion request to MiniMax."""
+        """Send chat completion request."""
         api_messages: list[dict[str, str]] = []
 
         if system_prompt:
@@ -47,7 +48,8 @@ class MiniMaxProvider(LLMProvider):
         for msg in messages:
             api_messages.append({"role": msg.role, "content": msg.content})
 
-        self._print_request(api_messages, temperature, max_tokens)
+        if settings.debug_mode:
+            self._print_request(api_messages, temperature, max_tokens)
 
         try:
             completion = self._client.chat.completions.create(
@@ -69,7 +71,8 @@ class MiniMaxProvider(LLMProvider):
                 "completion_tokens": completion.usage.completion_tokens if completion.usage else 0,
             },
         )
-        self._print_response(response)
+        if settings.debug_mode:
+            self._print_response(response)
         return response
 
     def _print_request(
@@ -79,10 +82,11 @@ class MiniMaxProvider(LLMProvider):
         max_tokens: int,
     ) -> None:
         print(f"[LLM Request]")
-        print(f"  URL:      {self._base_url}/chat/completions")
-        print(f"  API Key:  {_mask_key(self._api_key)}")
-        print(f"  Model:    {self._model}")
-        print(f"  MaxTokens: {max_tokens}")
+        print(f"  Provider:    {settings.llm_provider}")
+        print(f"  Base URL:    {self._base_url}")
+        print(f"  API Key:     {_mask_key(self._api_key)}")
+        print(f"  Model:       {self._model}")
+        print(f"  MaxTokens:   {max_tokens}")
         print(f"  Temperature: {temperature}")
         for i, msg in enumerate(messages):
             content_preview = msg["content"][:100]

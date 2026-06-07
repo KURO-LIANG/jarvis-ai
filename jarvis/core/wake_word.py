@@ -1,30 +1,48 @@
 class WakeWordDetector:
-    """Detects wake word in ASR transcriptions via case-insensitive substring match."""
+    """Detects wake words via strict exact/prefix match.
 
-    def __init__(self, wake_word: str = "jarvis") -> None:
-        self._wake_word = wake_word.lower()
+    Only words listed in the config can trigger wake-up.
+    No substring, fuzzy, or phonetic similarity matching.
+
+    Examples with wake_words=["jarvis", "javis"]:
+      "jarvis"       -> True  (exact)
+      "Jarvis"       -> True  (case-insensitive)
+      "jarvis hello" -> True  (prefix + separator)
+      "Jobs"         -> False
+      "Java"         -> False
+      "já ves"       -> False
+    """
+
+    def __init__(self, wake_words: list[str]) -> None:
+        self._wake_words = [w.lower() for w in wake_words]
 
     @property
-    def wake_word(self) -> str:
-        return self._wake_word
+    def wake_words(self) -> list[str]:
+        return list(self._wake_words)
 
     def is_wake_word(self, text: str) -> bool:
-        """Check if wake word appears anywhere in the text."""
-        return self._wake_word in text.lower()
+        """Strict match: normalized text must equal or start with a wake word
+        followed by a word boundary (separator or end-of-string)."""
+        t = text.lower().strip()
+        for w in self._wake_words:
+            if t == w:
+                return True
+            if t.startswith(w) and (
+                len(t) == len(w) or t[len(w)] in " ,.，。；;:：!！?？"
+            ):
+                return True
+        return False
 
     def strip_wake_word(self, text: str) -> str:
-        """Remove the wake word from the text, returning the actual command.
+        """Remove the leading wake word from text, returning the command part.
 
-        Keeps the remainder after the first occurrence of the wake word.
         E.g., "jarvis what time is it" -> "what time is it"
         """
-        text_lower = text.lower()
-        idx = text_lower.find(self._wake_word)
-        if idx == -1:
-            return text
-
-        after = text[idx + len(self._wake_word):].strip()
-        # Trim leading punctuation
-        while after and after[0] in ",.，。；;:：!！?？":
-            after = after[1:].strip()
-        return after
+        t = text.lower().strip()
+        for w in self._wake_words:
+            if t.startswith(w) and (
+                len(t) == len(w) or t[len(w)] in " ,.，。；;:：!！?？"
+            ):
+                after = text[len(w):].strip(" ,.，。；;:：!！?？")
+                return after
+        return text

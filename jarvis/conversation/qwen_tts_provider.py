@@ -11,12 +11,12 @@ class QwenTTSConversationProvider(ConversationProvider):
     """
 
     def __init__(self, speech_provider: SpeechProvider) -> None:
-        print("[Conversation Provider] QwenTTSConversationProvider"
-              f" (speech={type(speech_provider).__name__})")
+        if settings.debug_mode:
+            print("[Conversation Provider] QwenTTSConversationProvider"
+                  f" (speech={type(speech_provider).__name__})")
         self._speech = speech_provider
 
     def respond(self, user_text: str) -> ConversationResult:
-        print("Generating speech (TTS mode)...")
         output_path = settings.output_wav_path.with_suffix(
             f".{self._speech.audio_format}"
         )

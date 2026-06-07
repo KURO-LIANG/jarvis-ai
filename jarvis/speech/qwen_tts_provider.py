@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from jarvis.config import settings
 from jarvis.speech.base import SpeechProvider
 from jarvis.tts.qwen_tts import QwenTTS
 
@@ -20,10 +21,11 @@ class QwenSpeechProvider(SpeechProvider):
         timeout: int = 60,
         max_retries: int = 1,
     ) -> None:
-        print(f"[Speech Provider] QwenSpeechProvider")
-        print(f"  Model: {model}")
-        print(f"  Voice: {voice}")
-        print()
+        if settings.debug_mode:
+            print(f"[Speech Provider] QwenSpeechProvider")
+            print(f"  Model: {model}")
+            print(f"  Voice: {voice}")
+            print()
         self._tts = QwenTTS(
             base_url=base_url,
             api_key=api_key,

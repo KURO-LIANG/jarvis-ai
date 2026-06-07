@@ -16,29 +16,15 @@ def main() -> None:
 
     input_mode = "DEBUG (text input)" if settings.debug_mode else "VOICE (microphone)"
     conv_mode = settings.conversation_mode.upper()
-    sid = settings
-    sp = sid.speech_provider.upper()
-    if sid.speech_provider == "qwen":
-        sm = sid.tts_model
-    else:
-        sm = sid.minimax_speech_model
 
     print("=" * 50)
     print("  JARVIS Voice Assistant")
-    print(f"  Input Mode:         {input_mode}")
+    print(f"  Input:     {input_mode}")
     if not settings.debug_mode:
-        print(f"  Wake Word:          '{settings.wake_word}'")
-        print(f"  Timeout:            {settings.conversation_timeout}s")
-        print(f"  Exit Commands:      {', '.join(settings.exit_commands[:5])}...")
-    print(f"  Conversation Mode:  {conv_mode}")
-    print(f"  Speech Provider:    {sp}")
-    print(f"  Speech Model:       {sm}")
-    if sid.speech_provider == "minimax":
-        print(f"  Speech Mode:        {sid.minimax_speech_mode}")
-        print(f"  Voice ID:           {sid.minimax_speech_voice_id}")
-        print(f"  Audio Format:       {sid.minimax_speech_audio_format}")
-    print(f"  Memory:             {'ON' if sid.memory_enabled else 'OFF'}"
-          f" (max {sid.memory_max_turns} turns)")
+        words = ", ".join(f"'{w}'" for w in settings.wake_words)
+        print(f"  Wake Words: {words}")
+    print(f"  Mode:      {conv_mode}")
+    print(f"  Speech:    {settings.speech_provider.upper()}")
     print("  Press Ctrl+C to exit")
     print("=" * 50)
 

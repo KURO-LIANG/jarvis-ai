@@ -20,7 +20,7 @@ def create_speech_provider() -> SpeechProvider:
 
     if sp == "minimax":
         return MiniMaxSpeechProvider(
-            api_key=settings.minimax_api_key,
+            api_key=settings.speech_api_key,
             url=settings.minimax_speech_url,
             model=settings.minimax_speech_model,
             mode=settings.minimax_speech_mode,

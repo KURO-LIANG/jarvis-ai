@@ -3,6 +3,8 @@ from pathlib import Path
 
 import requests
 
+from jarvis.config import settings
+
 
 class TTSError(Exception):
     """Raised when text-to-speech synthesis fails."""
@@ -47,7 +49,8 @@ class QwenTTS:
         for attempt in range(self._max_retries + 1):
             try:
                 headers = self._build_headers()
-                self._print_request(text)
+                if settings.debug_mode:
+                    self._print_request(text)
                 response = requests.post(
                     self._endpoint,
                     json=payload,
@@ -60,7 +63,8 @@ class QwenTTS:
                     if not audio_bytes:
                         raise TTSError("TTS returned empty audio.")
                     output_path.write_bytes(audio_bytes)
-                    self._print_response(len(audio_bytes))
+                    if settings.debug_mode:
+                        self._print_response(len(audio_bytes))
                     return
 
                 if response.status_code >= 500 and attempt < self._max_retries:

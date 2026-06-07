@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from jarvis.config import settings
 from jarvis.llm.base import LLMProvider, Message
 from jarvis.memory.extractor import MemoryExtractor
 from jarvis.memory.models import ConversationTurn
@@ -27,9 +28,8 @@ class MemoryManager:
 
     def load(self) -> None:
         self._summary.load()
-        if not self._summary.is_empty():
+        if not self._summary.is_empty() and settings.debug_mode:
             print("[Memory] Loaded existing user memory")
-            # Print summary
             for line in self._summary.build_prompt().split("\n"):
                 if line.strip() and line.strip() not in ("=== USER MEMORY ===", "=== END MEMORY ==="):
                     print(f"  {line.strip()}")
@@ -50,7 +50,7 @@ class MemoryManager:
             return
         if info:
             changed = self._summary.merge(info)
-            if changed:
+            if changed and settings.debug_mode:
                 print("[Memory] Updated user memory")
 
     # ─── context building ─────────────────────────────────

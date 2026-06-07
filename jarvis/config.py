@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # Speech provider: "qwen" (OMLX local TTS) or "minimax" (MiniMax T2A v2 API)
     speech_provider: str = "qwen"
+    speech_api_key: str = ""
     minimax_speech_url: str = "https://api.minimaxi.com/v1/t2a_v2"
     minimax_speech_model: str = "speech-2.8-turbo"
     minimax_speech_mode: str = "stream"  # "stream" or "normal"
@@ -37,18 +38,19 @@ class Settings(BaseSettings):
     minimax_speech_bitrate: int = 128000
     minimax_speech_channel: int = 1
 
-    # MiniMax (OpenAI-compatible LLM)
-    minimax_api_key: str = ""
-    minimax_base_url: str = "https://api.minimaxi.com/v1"
-    minimax_model: str = "MiniMax-M3"
-    minimax_max_tokens: int = 1024
-    minimax_temperature: float = 0.7
+    # LLM provider: "openai" (OpenAI-compatible API)
+    llm_provider: str = "openai"
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api.minimaxi.com/v1"
+    llm_model: str = "MiniMax-M3"
+    llm_max_tokens: int = 1024
+    llm_temperature: float = 0.7
 
     # Audio
     sample_rate: int = 16000
     channels: int = 1
 
-    # Conversation mode: "llm" (MiniMax) or "tts" (Qwen3-TTS direct)
+    # Conversation mode: "llm" (LLM via OpenAI-compatible API) or "tts" (Qwen3-TTS direct)
     conversation_mode: str = "llm"
 
     # System prompt for LLM conversation mode
@@ -56,6 +58,22 @@ class Settings(BaseSettings):
         "You are Jarvis, a helpful AI voice assistant. "
         "Keep responses concise and conversational. "
         "Limit responses to 2-3 sentences when possible."
+    )
+
+    # Interjection tags — MiniMax T2A renders these as non-verbal sounds
+    interjection_enabled: bool = False
+    interjection_prompt: str = (
+        "You may insert interjection tags in your responses to make the speech "
+        "more expressive and natural. Available tags:\n"
+        "(laughs) laugh, (chuckle) light laugh, (coughs) cough, "
+        "(clear-throat) clear throat, (groans) groan, (breath) normal breath, "
+        "(pant) panting, (inhale) inhale, (exhale) exhale, "
+        "(gasps) gasp, (sniffs) sniff, (sighs) sigh, "
+        "(snorts) snort, (burps) burp, (lip-smacking) lip smack, "
+        "(humming) humming, (hissing) hiss, (emm) hesitation 'umm', "
+        "(sneezes) sneeze.\n"
+        "Insert tags naturally where appropriate, e.g. "
+        '"今天真是(sighs)太累了" or "(laughs)这个笑话真有趣".'
     )
 
     # Debug mode - skip microphone/ASR, use terminal text input
@@ -71,18 +89,40 @@ class Settings(BaseSettings):
     memory_auto_extract: bool = True
     memory_storage_path: str = "~/.jarvis/memory"
 
-    # Wake word + continuous listening
-    wake_word: str = "jarvis"
-    conversation_timeout: float = 15.0
-    vad_aggressiveness: int = 2  # 0=least, 3=most aggressive
+    # Wake words — strict exact/prefix match, no substring/fuzzy matching
+    wake_words: list[str] = ["jarvis", "javis", "贾维斯"]
+
+    # Wake responses — randomly chosen when wake word detected (no consecutive repeats)
+    wake_responses: list[str] = [
+        "嗯？",
+        "我在。",
+        "怎么了？",
+        "在呢。",
+        "请讲。",
+        "我在听。",
+        "有什么事吗？",
+        "I'm here.",
+        "I'm here sir.",
+        "Yes sir.",
+    ]
+
+    # VAD
+    vad_provider: str = "silero"  # "silero" or "webrtc"
+    silero_threshold: float = 0.5  # Speech probability threshold
+    silero_min_speech_ms: int = 300
+    silero_silence_ms: int = 800
+    conversation_timeout: float = 30.0
+
+    # Wake response guard delay (ms) — prevents speaker residual from being captured
+    wake_response_guard_ms: int = 500
+
+    # Beeps
     wake_beep_enabled: bool = True
     timeout_beep_enabled: bool = True
 
     # Voice commands
-    exit_commands: list[str] = [
-        "安静", "闭嘴", "退出", "别说话", "去休息",
-        "退出聊天", "不和你聊了", "结束对话", "再见",
-    ]
+    exit_commands: list[str] = ["退出", "结束", "停止", "拜拜", "再见"]
+    interrupt_commands: list[str] = ["停止", "停一下", "打断", "闭嘴"]
 
     # Retry
     max_retries: int = 1
@@ -102,12 +142,10 @@ def validate_config() -> list[tuple[str, str]]:
     errors: list[tuple[str, str]] = []
 
     missing = []
-    needs_minimax = (
-        settings.conversation_mode == "llm"
-        or settings.speech_provider == "minimax"
-    )
-    if needs_minimax and not settings.minimax_api_key:
-        missing.append("MINIMAX_API_KEY")
+    if settings.conversation_mode == "llm" and not settings.llm_api_key:
+        missing.append("LLM_API_KEY")
+    if settings.speech_provider == "minimax" and not settings.speech_api_key:
+        missing.append("SPEECH_API_KEY")
     if not settings.omlx_api_key:
         missing.append("OMLX_API_KEY")
 

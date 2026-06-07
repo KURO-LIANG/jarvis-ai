@@ -20,8 +20,8 @@ class ContinuousMicStream:
         self,
         sample_rate: int = 16000,
         channels: int = 1,
-        blocksize: int = 480,  # 30ms at 16kHz
-        queue_size: int = 200,  # ~6s buffer at 30ms frames
+        blocksize: int = 512,  # 32ms at 16kHz (minimum Silero VAD accepts)
+        queue_size: int = 200,  # ~6s buffer at 32ms frames
     ) -> None:
         self._sample_rate = sample_rate
         self._channels = channels

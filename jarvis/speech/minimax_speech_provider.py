@@ -5,6 +5,7 @@ from typing import Iterator
 
 import requests
 
+from jarvis.config import settings
 from jarvis.speech.base import SpeechError, SpeechProvider
 
 
@@ -49,23 +50,24 @@ class MiniMaxSpeechProvider(SpeechProvider):
         self._timeout = timeout
         self._max_retries = max_retries
 
-        print(f"[Speech Provider] MiniMaxSpeechProvider")
-        print(f"  Model:    {model}")
-        print(f"  Mode:     {mode}")
-        print(f"  Voice:    {self._voice_setting['voice_id']}")
-        print(f"  Format:   {self._audio_setting['format']}")
-        print()
+        if settings.debug_mode:
+            print(f"[Speech Provider] MiniMaxSpeechProvider")
+            print(f"  Model:    {model}")
+            print(f"  Mode:     {mode}")
+            print(f"  Voice:    {self._voice_setting['voice_id']}")
+            print(f"  Format:   {self._audio_setting['format']}")
+            print()
 
     def synthesize(self, text: str, output_path: Path) -> Path:
         if self._mode == "stream":
             # MiniMax T2A streaming sends cumulative chunks — each new chunk
             # contains all audio from the start. Only keep the final chunk.
+            if settings.debug_mode:
+                print(f"[TTS Stream] Starting: \"{text[:60]}{'...' if len(text) > 60 else ''}\"")
             audio_bytes = b""
             for chunk in self.synthesize_stream(text):
                 audio_bytes = chunk
             output_path.write_bytes(audio_bytes)
-            print(f"[TTS Response] status=200, audio_bytes={len(audio_bytes)}")
-            print()
             return output_path
 
         return self._synthesize_normal(text, output_path)
@@ -82,7 +84,8 @@ class MiniMaxSpeechProvider(SpeechProvider):
         for attempt in range(self._max_retries + 1):
             try:
                 headers = self._build_headers()
-                self._print_request(text, stream=True)
+                if settings.debug_mode:
+                    self._print_request(text, stream=True)
 
                 response = requests.post(
                     self._endpoint,
@@ -102,6 +105,7 @@ class MiniMaxSpeechProvider(SpeechProvider):
                     )
 
                 total_bytes = 0
+                chunk_count = 0
                 for line in response.iter_lines():
                     if not line:
                         continue
@@ -126,13 +130,19 @@ class MiniMaxSpeechProvider(SpeechProvider):
                                   f"raw preview: {audio_hex[:80]}...")
                             continue
                         total_bytes += len(chunk)
+                        chunk_count += 1
+                        if settings.debug_mode:
+                            print(f"[TTS Stream] chunk={chunk_count}, "
+                                  f"bytes={len(chunk)}, total={total_bytes}")
                         yield chunk
 
                     if status == 2:  # end of stream
                         break
 
-                print(f"[TTS Response] status=200, audio_bytes={total_bytes} (streamed)")
-                print()
+                if settings.debug_mode:
+                    print(f"[TTS Stream] Done, {chunk_count} chunks, "
+                          f"{total_bytes} total bytes")
+                    print()
                 return
 
             except requests.RequestException as e:
@@ -159,7 +169,8 @@ class MiniMaxSpeechProvider(SpeechProvider):
         for attempt in range(self._max_retries + 1):
             try:
                 headers = self._build_headers()
-                self._print_request(text, stream=False)
+                if settings.debug_mode:
+                    self._print_request(text, stream=False)
                 response = requests.post(
                     self._endpoint,
                     json=payload,
@@ -175,8 +186,9 @@ class MiniMaxSpeechProvider(SpeechProvider):
 
                     audio_bytes = self._decode_audio_hex(audio_hex)
                     output_path.write_bytes(audio_bytes)
-                    print(f"[TTS Response] status=200, audio_bytes={len(audio_bytes)}")
-                    print()
+                    if settings.debug_mode:
+                        print(f"[TTS Normal] status=200, audio_bytes={len(audio_bytes)}")
+                        print()
                     return output_path
 
                 if response.status_code >= 500 and attempt < self._max_retries:
